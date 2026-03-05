@@ -10,19 +10,17 @@ from collections import Counter
 from datetime import datetime
 
 # ==========================================
-# 1. 設定與 CSS 優化 (深色模式修復版)
+# 1. 設定與 CSS 優化 (深色模式)
 # ==========================================
 st.set_page_config(
-    page_title="區塊鏈詐欺偵測系統",
+    page_title="區塊鏈早期防詐預警系統",
     page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# ★★★ CSS 修復重點：針對深色模式優化配色 ★★★
 st.markdown("""
     <style>
-    /* 主標題：紅色系，在深色背景很顯眼 */
     .main-title {
         text-align: center;
         font-size: 3rem;
@@ -30,141 +28,137 @@ st.markdown("""
         color: #FF4B4B; 
         margin-bottom: 0px;
     }
-    /* 副標題：灰白色 */
     .sub-title {
         text-align: center;
         font-size: 1.2rem;
         color: #E0E0E0;
         margin-bottom: 30px;
     }
-    
-    /* 數據卡片優化 (解決文字看不見的問題) */
     div[data-testid="stMetric"] {
-        background-color: #262730; /* 深灰色背景 */
-        border: 1px solid #464b5f; /* 邊框 */
+        background-color: #262730; 
+        border: 1px solid #464b5f; 
         padding: 15px;
         border-radius: 10px;
-        box-shadow: 2px 2px 5px rgba(0,0,0,0.5); /* 陰影 */
+        box-shadow: 2px 2px 5px rgba(0,0,0,0.5); 
     }
-    
-    /* 強制數據數值為亮白色 */
     div[data-testid="stMetricValue"] {
         color: #FFFFFF !important;
         font-weight: bold;
     }
-    
-    /* 強制數據標籤為淺灰色 */
     div[data-testid="stMetricLabel"] {
         color: #AAAAAA !important;
     }
     </style>
 """, unsafe_allow_html=True)
 
-# ★★★ 您的 Alchemy API Key ★★★
-ALCHEMY_URL = "https://eth-mainnet.g.alchemy.com/v2/HQJSb_FmasiwKPCINPjap" 
+# ★★★ 多鏈雷達 API 設定 (使用您的金鑰) ★★★
+API_KEY = "HQJSb_FmasiwKPCINPjap"
+NETWORK_URLS = {
+    "Ethereum (以太坊主網)": f"https://eth-mainnet.g.alchemy.com/v2/{API_KEY}",
+    "Arbitrum (L2)": f"https://arb-mainnet.g.alchemy.com/v2/{API_KEY}",
+    "Polygon (Matic)": f"https://polygon-mainnet.g.alchemy.com/v2/{API_KEY}",
+    "Base (L2)": f"https://base-mainnet.g.alchemy.com/v2/{API_KEY}",
+    "Optimism (L2)": f"https://opt-mainnet.g.alchemy.com/v2/{API_KEY}",
+    "BNB Chain (BSC)": f"https://bnb-mainnet.g.alchemy.com/v2/{API_KEY}"
+}
+
+BLOCK_WINDOW = 50400 # 7 天的區塊數量 (以太坊基準，其他鏈暫時共用此區塊數做基準)
 
 # ==========================================
-# 2. 核心功能：API 與 特徵計算
+# 2. 核心功能：API 與 特徵計算 (加入指定網路 URL)
 # ==========================================
-def get_real_features(address):
+def get_real_features(address, alchemy_url):
     headers = {"accept": "application/json", "content-type": "application/json"}
     features = {}
-    address = address.strip()
+    all_timestamps = []
     
     try:
-        # (A) 查詢餘額
-        payload_bal = {"id": 1, "jsonrpc": "2.0", "method": "eth_getBalance", "params": [address, "latest"]}
-        res_bal = requests.post(ALCHEMY_URL, headers=headers, data=json.dumps(payload_bal)).json()
+        address = address.strip()
         
-        if res_bal.get('error'):
-            st.error(f"❌ API Error: {res_bal['error'].get('message')}")
-            return None, None, None
+        # 步驟 A：錢包起點
+        payload_first = {
+            "id": 1, "jsonrpc": "2.0", "method": "alchemy_getAssetTransfers",
+            "params": [{"toAddress": address, "category": ["external", "internal", "erc20"], "order": "asc", "maxCount": "0x1"}]
+        }
+        res_first = requests.post(alchemy_url, headers=headers, data=json.dumps(payload_first)).json()
+        transfers_first = res_first.get('result', {}).get('transfers', [])
 
-        balance_wei = int(res_bal.get("result", "0x0"), 16)
-        features['total ether balance'] = balance_wei / 10**18
+        if not transfers_first:
+            return None, "此地址在該網路上為空錢包或尚無交易紀錄"
 
-        # (B) 查詢交易
-        base_params = {
-            "fromBlock": "0x0",
-            "category": ["external", "erc20"], 
-            "withMetadata": True,
-            "excludeZeroValue": False,
+        first_block_hex = transfers_first[0]['blockNum']
+        first_block_int = int(first_block_hex, 16)
+        end_block_hex = hex(first_block_int + BLOCK_WINDOW)
+
+        # 步驟 B：在時間內擷取特徵
+        params = {
+            "fromBlock": first_block_hex, 
+            "toBlock": end_block_hex, 
+            "withMetadata": True, 
             "maxCount": "0x3e8"
         }
 
-        # 1. Sent
-        params_sent = base_params.copy()
-        params_sent["fromAddress"] = address
-        payload_sent = {"id": 1, "jsonrpc": "2.0", "method": "alchemy_getAssetTransfers", "params": [params_sent]}
-        res_sent = requests.post(ALCHEMY_URL, headers=headers, data=json.dumps(payload_sent)).json()
-        sent_txs = res_sent.get('result', {}).get('transfers', [])
+        # 1. 外部原生代幣接收
+        payload_in = {"id": 1, "jsonrpc": "2.0", "method": "alchemy_getAssetTransfers", "params": [{**params, "toAddress": address, "category": ["external"]}]}
+        txs_in = requests.post(alchemy_url, headers=headers, data=json.dumps(payload_in)).json().get('result', {}).get('transfers', [])
+        
+        features['Received Tnx'] = len(txs_in)
+        vals_in = [float(x['value'] or 0) for x in txs_in]
+        features['total ether received'] = sum(vals_in)
+        features['Max Val Received'] = max(vals_in) if vals_in else 0
+        for x in txs_in: 
+            if 'metadata' in x: all_timestamps.append(x['metadata']['blockTimestamp'])
 
-        # 2. Received
-        params_rec = base_params.copy()
-        params_rec["toAddress"] = address
-        payload_rec = {"id": 1, "jsonrpc": "2.0", "method": "alchemy_getAssetTransfers", "params": [params_rec]}
-        res_rec = requests.post(ALCHEMY_URL, headers=headers, data=json.dumps(payload_rec)).json()
-        received_txs = res_rec.get('result', {}).get('transfers', [])
+        # 2. 外部原生代幣發送
+        payload_out = {"id": 1, "jsonrpc": "2.0", "method": "alchemy_getAssetTransfers", "params": [{**params, "fromAddress": address, "category": ["external"]}]}
+        txs_out = requests.post(alchemy_url, headers=headers, data=json.dumps(payload_out)).json().get('result', {}).get('transfers', [])
+        
+        features['Sent tnx'] = len(txs_out)
+        vals_out = [float(x['value'] or 0) for x in txs_out]
+        features['total Ether sent'] = sum(vals_out)
+        features['Max Val Sent'] = max(vals_out) if vals_out else 0
+        for x in txs_out: 
+            if 'metadata' in x: all_timestamps.append(x['metadata']['blockTimestamp'])
 
-        # (C) 計算特徵
-        eth_sent = [tx for tx in sent_txs if tx['asset'] == 'ETH']
-        eth_received = [tx for tx in received_txs if tx['asset'] == 'ETH']
+        # 3. ERC20 收發
+        payload_in_20 = {"id": 1, "jsonrpc": "2.0", "method": "alchemy_getAssetTransfers", "params": [{**params, "toAddress": address, "category": ["erc20"]}]}
+        txs_in_20 = requests.post(alchemy_url, headers=headers, data=json.dumps(payload_in_20)).json().get('result', {}).get('transfers', [])
+        
+        payload_out_20 = {"id": 1, "jsonrpc": "2.0", "method": "alchemy_getAssetTransfers", "params": [{**params, "fromAddress": address, "category": ["erc20"]}]}
+        txs_out_20 = requests.post(alchemy_url, headers=headers, data=json.dumps(payload_out_20)).json().get('result', {}).get('transfers', [])
 
-        features['Sent tnx'] = len(eth_sent)
-        features['Received Tnx'] = len(eth_received)
-        features['total Ether sent'] = sum([float(tx['value'] or 0) for tx in eth_sent])
-        features['total ether received'] = sum([float(tx['value'] or 0) for tx in eth_received])
+        features[' Total ERC20 tnxs'] = len(txs_in_20) + len(txs_out_20)
+        features[' ERC20 uniq rec addr'] = float(len(set([x['from'] for x in txs_in_20])))
+        features[' ERC20 uniq sent addr'] = float(len(set([x['to'] for x in txs_out_20])))
 
-        if features['total ether received'] > 0:
-            features['Sent/Received Ratio'] = features['total Ether sent'] / features['total ether received']
+        # 4. 衍生特徵
+        zero_count = 0
+        for tx in txs_out + txs_out_20:
+            if tx.get('value') == 0 or tx.get('value') is None:
+                zero_count += 1
+        features['Zero Value Tx Count'] = zero_count
+
+        if features['Received Tnx'] + features[' Total ERC20 tnxs'] > 0:
+            features['Sent/Received Ratio'] = (features['Sent tnx'] + len(txs_out_20)) / (features['Received Tnx'] + features[' Total ERC20 tnxs'])
         else:
             features['Sent/Received Ratio'] = 0
 
-        # (D) ERC20 特徵
-        erc20_sent = [tx for tx in sent_txs if tx['category'] == 'erc20']
-        erc20_received = [tx for tx in received_txs if tx['category'] == 'erc20']
-
-        features['Total ERC20 tnxs'] = len(erc20_sent) + len(erc20_received)
-        features['ERC20 uniq sent addr'] = len(set([tx['to'] for tx in erc20_sent]))
-        features['ERC20 uniq rec addr'] = len(set([tx['from'] for tx in erc20_received]))
-
-        rec_token_counts = Counter([tx['asset'] for tx in erc20_received])
-        sent_token_counts = Counter([tx['asset'] for tx in erc20_sent])
-        
-        most_rec_token = rec_token_counts.most_common(1)[0][0] if rec_token_counts else "None"
-        most_sent_token = sent_token_counts.most_common(1)[0][0] if sent_token_counts else "None"
-
-        # (E) 複雜特徵
-        all_vals_rec = [float(tx['value'] or 0) for tx in eth_received]
-        all_vals_sent = [float(tx['value'] or 0) for tx in eth_sent]
-        features['Max Val Received'] = max(all_vals_rec) if all_vals_rec else 0
-        features['Max Val Sent'] = max(all_vals_sent) if all_vals_sent else 0
-
-        features['Zero Value Tx Count'] = len([tx for tx in eth_sent if float(tx['value'] or 0) == 0])
-
-        all_txs = sent_txs + received_txs
-        if all_txs:
-            timestamps = [datetime.strptime(tx['metadata']['blockTimestamp'], "%Y-%m-%dT%H:%M:%S.%fZ").timestamp() for tx in all_txs if 'blockTimestamp' in tx['metadata']]
-            if timestamps:
-                features['Time Diff between first and last (Mins)'] = (max(timestamps) - min(timestamps)) / 60
+        if all_timestamps:
+            ts_list = [datetime.fromisoformat(t.replace('Z', '+00:00')).timestamp() for t in all_timestamps]
+            ts_list.sort()
+            features['Time Diff between first and last (Mins)'] = (ts_list[-1] - ts_list[0]) / 60
+            if len(ts_list) > 1:
+                features['Avg min between sent tnx'] = ((ts_list[-1] - ts_list[0]) / (len(ts_list)-1)) / 60
             else:
-                features['Time Diff between first and last (Mins)'] = 0
+                features['Avg min between sent tnx'] = 0
         else:
             features['Time Diff between first and last (Mins)'] = 0
-
-        if len(sent_txs) > 1:
-            sent_timestamps = sorted([datetime.strptime(tx['metadata']['blockTimestamp'], "%Y-%m-%dT%H:%M:%S.%fZ").timestamp() for tx in sent_txs if 'blockTimestamp' in tx['metadata']])
-            diffs = np.diff(sent_timestamps)
-            avg_diff_seconds = np.mean(diffs)
-            features['Avg min between sent tnx'] = avg_diff_seconds / 60
-        else:
             features['Avg min between sent tnx'] = 0
 
-        return features, most_rec_token, most_sent_token
+        return features, None
 
     except Exception as e:
-        st.error(f"程式執行錯誤: {e}")
-        return None, None, None
+        return None, str(e)
 
 # ==========================================
 # 3. 載入模型
@@ -188,122 +182,110 @@ bst, model_columns = load_assets()
 # 4. 前端介面設計 (UI Layer)
 # ==========================================
 
-# 標題區
-st.markdown('<div class="main-title">🛡️ 區塊鏈詐欺偵測系統</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Blockchain Fraud Detection System powered by XGBoost</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">🛡️ 區塊鏈防詐預警系統</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Hybrid Architecture: ML Time-Windowing + Expert Rules + Multi-Chain Radar</div>', unsafe_allow_html=True)
 
-# 介紹區
-with st.expander("ℹ️ 關於本系統 (System Overview)"):
+with st.expander("ℹ️ 關於本系統架構 (System Architecture)"):
     st.markdown("""
-    **系統簡介：**
-    本研究針對以太坊 (Ethereum) 上的詐欺與異常帳戶行為進行分析。透過結合 **機器學習 (XGBoost)** 與 **鏈上即時數據 (Alchemy)**，本系統能有效識別潛在的惡意帳戶（如女巫攻擊、資金盤、異常洗錢行為）。
-
-    **使用說明：**
-    1. 輸入 **以太坊錢包地址** (0x...)。
-    2. 系統將即時抓取其歷史交易與代幣流向。
-    3. 產出風險評估報告，判斷是否為 **「高風險詐欺帳戶」**。
+    **【混合式防禦雙擎架構】**
+    本系統不僅採用機器學習，更結合了專家防線，打造多維度的預警網：
+    1. **動態時間窗 (Time Window)：** 嚴格擷取目標誕生後 7 天內的行為，根除生命週期外洩偏差。
+    2. **規則引擎 (Rule-based Engine)：** 針對超越 AI 歷史認知極限的國家級/機構級巨鯨駭客（Out-of-Distribution 異常），啟動強制攔截防線。
+    3. **多鏈雷達 (Multi-Chain Radar)：** 支援動態切換以太坊及各大 Layer-2 網路，讓跨鏈流竄的惡意空錢包無所遁形。
     """)
 
-# ★★★ 側邊欄 (學術專業版文案) ★★★
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/0/05/Ethereum_logo_2014.svg/1257px-Ethereum_logo_2014.svg.png", width=50)
     st.title("模型架構資訊")
     
     st.markdown("---")
     
-    st.markdown("### 🧠 核心演算法")
-    st.info("**XGBoost Classifier**\n(eXtreme Gradient Boosting)")
-    st.caption("採用基於樹的梯度提升演算法，具備高效能與高擴展性，特別適合處理稀疏矩陣數據。")
+    st.markdown("### 🧠 核心技術")
+    st.info("**XGBoost Classifier**\n+ Rule-based Override")
+    st.caption("結合行為模型與領域專家規則，突破單一 AI 黑盒子極限。")
 
-    st.markdown("### 🎯 模型效能")
+    st.markdown("### 🎯 嚴謹驗證效能")
     col_a, col_b = st.columns(2)
     with col_a:
-        st.metric("F1-Score", "95.35%")
+        st.metric("F1-Score", "80.55%")
     with col_b:
-        st.metric("準確率", "95.0%")
-    st.caption("經由 Grid Search 優化之最佳參數組合。")
-
-    st.markdown("### 🏗️ 特徵工程")
-    # 修正：確保 model_columns 存在才取長度
-    if model_columns is not None:
-        feat_count = len(model_columns)
-    else:
-        feat_count = 2847
-        
-    st.write(f"**監測特徵總數：{feat_count:,} 個**")
-    st.progress(100)
-    st.markdown("""
-    包含兩大類行為分析：
-    - **交易行為 (Transactional)**：頻率、金額、時間差。
-    - **代幣流向 (Token Interaction)**：針對數千種 ERC-20 代幣進行 One-Hot 編碼分析。
-    """)
+        st.metric("召回率 (Recall)", "87.0%")
+    st.caption("經由 5-Fold 交叉驗證與特徵消融實驗成績。")
     
     st.markdown("---")
     st.caption("© 2026 Blockchain Research Lab")
 
-# 主輸入區
-st.markdown("### 🔍 帳號風險查詢")
-col1, col2 = st.columns([3, 1])
+st.markdown("### 🔍 帳號首週行為分析")
 
-with col1:
-    address_input = st.text_input("請輸入目標錢包地址", "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045", placeholder="0x...", label_visibility="collapsed")
+# 🌟 新增：多鏈雷達選擇器
+col_net, col_addr = st.columns([1, 2.5])
+with col_net:
+    selected_network_name = st.selectbox("🌐 掃描網路 (多鏈雷達)", list(NETWORK_URLS.keys()))
+with col_addr:
+    address_input = st.text_input("請輸入目標錢包地址", "0x59ABf3837Fa962d6853b4Cc0a19513AA031fd32b", placeholder="0x...")
 
-with col2:
-    analyze_btn = st.button("🚀 開始偵測", type="primary", use_container_width=True)
+analyze_btn = st.button("🚀 啟動混合雙擎偵測", type="primary", use_container_width=True)
 
-# 執行邏輯
 if analyze_btn:
     if bst is None:
-        st.error("⚠️ 系統錯誤：偵測模型未載入，請確認伺服器狀態。")
+        st.error("⚠️ 系統錯誤：偵測模型未載入，請確認 V5 版 JSON 與 Joblib 檔案是否在同一目錄下。")
     elif not address_input.startswith("0x") or len(address_input) != 42:
-        st.warning("⚠️ 地址格式錯誤，請輸入標準的 Ethereum 地址 (42字元)")
+        st.warning("⚠️ 地址格式錯誤，請輸入標準的 EVM 地址 (42字元)")
     else:
-        with st.spinner('🔗 正在掃描區塊鏈交易紀錄...'):
-            real_features, most_rec, most_sent = get_real_features(address_input)
+        # 動態取得選擇的網路 URL
+        current_alchemy_url = NETWORK_URLS[selected_network_name]
+        
+        with st.spinner(f'🔗 正在 {selected_network_name} 上尋找帳號起點並掃描交易...'):
+            real_features, error_msg = get_real_features(address_input, current_alchemy_url)
             
-            if real_features:
+            if error_msg:
+                st.warning(f"⚠️ {error_msg}")
+            elif real_features:
                 input_df = pd.DataFrame(columns=model_columns)
                 input_df.loc[0] = 0
                 for col, val in real_features.items():
                     if col in input_df.columns:
                         input_df[col] = val
                 
-                rec_col = f"ERC20_most_rec_token_type_{most_rec}"
-                sent_col = f"ERC20 most sent token type_{most_sent}"
-                if rec_col in input_df.columns: input_df[rec_col] = 1
-                if sent_col in input_df.columns: input_df[sent_col] = 1
-
+                # 將 DataFrame 轉換為 DMatrix 以供 XGBoost 預測
                 dtest = xgb.DMatrix(input_df)
                 prediction = bst.predict(dtest)[0]
+                
+                # ==========================================
+                # 新增：規則防線 (Rule-based Override)
+                # ==========================================
+                is_super_whale_hacker = False
+                total_txns = real_features['Sent tnx'] + real_features['Received Tnx']
+                
+                # 規則：首週接收超過 1000 顆原生代幣，且交易極度高頻 (>50次)
+                if real_features['Max Val Received'] > 1000 and total_txns > 50:
+                    is_super_whale_hacker = True
+                    prediction = 0.9999 # 強制覆蓋 AI 預測
                 
                 # --- 結果展示 ---
                 st.markdown("---")
                 st.subheader("📊 偵測報告 (Detection Report)")
 
-                res_col1, res_col2, res_col3 = st.columns([1.5, 1.5, 1])
+                res_col1, res_col2 = st.columns([1.5, 2])
 
                 with res_col1:
                     st.markdown("**系統判讀結果**")
                     risk_score = prediction * 100
                     st.metric("詐欺/異常機率 (Fraud Score)", f"{risk_score:.2f}%")
                     
-                    if prediction > 0.5:
-                        st.error("🚨 **高風險 (Fraudulent)**\n系統判定此為詐欺或異常帳戶。")
+                    if is_super_whale_hacker:
+                        st.error("🚨 **【重大安全警報】極端異常巨鯨**\n系統偵測到機構級巨量資金與極端高頻交易，觸發防護規則 (Rule-based Override)，判定為極高風險帳戶！")
+                    elif prediction > 0.5:
+                        st.error("🚨 **高風險 (Fraudulent)**\n系統 AI 模型判定其首週行為側寫符合詐欺特徵。")
                     else:
-                        st.success("✅ **正常 (Normal)**\n該地址行為模式正常。")
+                        st.success("✅ **正常 (Normal)**\n該地址初期行為模式正常。")
 
                 with res_col2:
-                    st.markdown("**關鍵行為特徵**")
+                    st.markdown("**首週關鍵行為側寫**")
                     st.write(f"⏱️ 平均交易間隔: `{real_features['Avg min between sent tnx']:.2f} 分`")
                     st.write(f"💸 發送/接收比率: `{real_features['Sent/Received Ratio']:.2f}`")
-                    st.write(f"🔄 總交易次數: `{int(real_features['Sent tnx'] + real_features['Received Tnx'])}`")
-
-                with res_col3:
-                    st.markdown("**代幣流向**")
-                    st.caption("主要接收")
-                    st.code(most_rec)
-                    st.caption("主要發送")
-                    st.code(most_sent)
+                    st.write(f"🔄 首週交易總數: `{int(total_txns)} 次`")
+                    st.write(f"💰 最大單筆接收: `{real_features['Max Val Received']:.4f}`")
 
                 st.markdown("#### 📈 行為模式分析圖")
                 viz_df = pd.DataFrame({
@@ -312,5 +294,5 @@ if analyze_btn:
                 })
                 st.bar_chart(viz_df.set_index('特徵'))
                 
-                with st.expander("🔍 查看詳細交易數據"):
+                with st.expander("🔍 查看詳細萃取數據 (Debug)"):
                     st.json(real_features)

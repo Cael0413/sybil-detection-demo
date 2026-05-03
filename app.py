@@ -60,13 +60,13 @@ st.markdown(
 def get_api_key():
     try:
         if "ALCHEMY_API_KEY" in st.secrets:
-            return st.secrets["https://eth-mainnet.g.alchemy.com/v2/HQJSb_FmasiwKPCINPjap"]
+            return st.secrets["ALCHEMY_API_KEY"]
     except Exception:
         pass
-    return os.getenv("https://eth-mainnet.g.alchemy.com/v2/HQJSb_FmasiwKPCINPjap")
+    return os.getenv("ALCHEMY_API_KEY")
 
 
-API_KEY = get_api_key(https://eth-mainnet.g.alchemy.com/v2/HQJSb_FmasiwKPCINPjap)
+API_KEY = "HQJSb_FmasiwKPCINPjap"
 
 NETWORK_URLS = {}
 if API_KEY:

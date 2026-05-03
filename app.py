@@ -106,11 +106,9 @@ def build_column_lookup(model_columns):
 
 def align_features_to_model_columns(real_features, model_columns):
     """
-    先建立全 float 的輸入表，避免欄位 dtype 為 int64 時，
-    寫入浮點數特徵而報錯。
+    依模型內建欄位建立輸入表，統一用 float，避免 int64 / float 衝突。
     """
     input_df = pd.DataFrame([[0.0] * len(model_columns)], columns=model_columns).astype(float)
-
     column_lookup = build_column_lookup(model_columns)
 
     for raw_key, value in real_features.items():
@@ -128,6 +126,9 @@ def align_features_to_model_columns(real_features, model_columns):
 # 4. 特徵擷取
 # ==========================================
 def get_real_features(address, alchemy_url):
+    """
+    以地址首次收到資金為起點，向後抓取 7 天視窗內可觀察行為。
+    """
     features = {}
     all_timestamps = []
 
@@ -219,8 +220,12 @@ def get_real_features(address, alchemy_url):
         txs_out_20 = safe_post(alchemy_url, payload_out_20).get("result", {}).get("transfers", [])
 
         features["Total ERC20 tnxs"] = len(txs_in_20) + len(txs_out_20)
-        features["ERC20 uniq rec addr"] = float(len(set(tx.get("from") for tx in txs_in_20 if tx.get("from"))))
-        features["ERC20 uniq sent addr"] = float(len(set(tx.get("to") for tx in txs_out_20 if tx.get("to"))))
+        features["ERC20 uniq rec addr"] = float(
+            len(set(tx.get("from") for tx in txs_in_20 if tx.get("from")))
+        )
+        features["ERC20 uniq sent addr"] = float(
+            len(set(tx.get("to") for tx in txs_out_20 if tx.get("to")))
+        )
 
         # 4. 零值交易
         zero_count = 0
@@ -235,7 +240,7 @@ def get_real_features(address, alchemy_url):
         total_sent = features["Sent tnx"] + len(txs_out_20)
         features["Sent/Received Ratio"] = (total_sent / total_received) if total_received > 0 else 0
 
-        # 6. 時間特徵
+        # 6. 時間特徵（僅在模型需要時才填）
         if all_timestamps:
             ts_list = [datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp() for t in all_timestamps]
             ts_list.sort()
@@ -258,21 +263,23 @@ def get_real_features(address, alchemy_url):
 
 
 # ==========================================
-# 5. 載入模型
+# 5. 載入模型（直接使用模型內建欄位）
 # ==========================================
 @st.cache_resource
 def load_assets():
     model_path = "fraud_detector_xgb_t7.joblib"
-    columns_path = "model_columns_v5.joblib"
 
     if not os.path.exists(model_path):
         return None, None, f"找不到模型檔：{model_path}"
-    if not os.path.exists(columns_path):
-        return None, None, f"找不到欄位檔：{columns_path}"
 
     try:
         model = joblib.load(model_path)
-        model_columns = joblib.load(columns_path)
+
+        if hasattr(model, "feature_names_in_"):
+            model_columns = list(model.feature_names_in_)
+        else:
+            return None, None, "模型缺少 feature_names_in_，無法自動對齊欄位。"
+
         return model, model_columns, None
     except Exception as e:
         return None, None, f"模型載入失敗：{e}"
@@ -369,7 +376,7 @@ if analyze_btn:
     if not API_KEY:
         st.error("請先設定 ALCHEMY_API_KEY。")
     elif model is None or model_columns is None:
-        st.error("模型尚未成功載入，請確認模型檔與欄位檔是否正確。")
+        st.error("模型尚未成功載入，請確認模型檔是否正確。")
     elif not is_valid_evm_address(address_input):
         st.warning("地址格式錯誤，請輸入標準 EVM 地址（42 字元）。")
     else:
@@ -441,6 +448,9 @@ if analyze_btn:
 
                 with st.expander("🧾 模型輸入欄位預覽"):
                     st.dataframe(input_df.T.rename(columns={0: "value"}))
+
+                with st.expander("🧠 模型欄位列表"):
+                    st.write(model_columns)
 
             except Exception as e:
                 st.error(f"模型推論失敗：{e}")

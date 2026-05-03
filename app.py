@@ -66,7 +66,7 @@ def get_api_key():
     return os.getenv("https://eth-mainnet.g.alchemy.com/v2/HQJSb_FmasiwKPCINPjap")
 
 
-API_KEY = get_api_key()
+API_KEY = get_api_key(https://eth-mainnet.g.alchemy.com/v2/HQJSb_FmasiwKPCINPjap)
 
 NETWORK_URLS = {}
 if API_KEY:

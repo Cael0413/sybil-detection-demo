@@ -105,15 +105,21 @@ def build_column_lookup(model_columns):
 
 
 def align_features_to_model_columns(real_features, model_columns):
-    input_df = pd.DataFrame(columns=model_columns)
-    input_df.loc[0] = 0
+    """
+    先建立全 float 的輸入表，避免欄位 dtype 為 int64 時，
+    寫入浮點數特徵而報錯。
+    """
+    input_df = pd.DataFrame([[0.0] * len(model_columns)], columns=model_columns).astype(float)
 
     column_lookup = build_column_lookup(model_columns)
 
     for raw_key, value in real_features.items():
         normalized_key = raw_key.strip()
         if normalized_key in column_lookup:
-            input_df.at[0, column_lookup[normalized_key]] = value
+            try:
+                input_df.at[0, column_lookup[normalized_key]] = float(value)
+            except (TypeError, ValueError):
+                input_df.at[0, column_lookup[normalized_key]] = 0.0
 
     return input_df
 
@@ -377,11 +383,11 @@ if analyze_btn:
         elif real_features:
             try:
                 input_df = align_features_to_model_columns(real_features, model_columns)
+                input_df = input_df.astype(float)
+
                 prediction = float(model.predict_proba(input_df)[0][1])
 
-                # ==========================================
                 # 規則式安全防線
-                # ==========================================
                 is_extreme_anomaly = False
                 total_txns = int(real_features.get("Sent tnx", 0) + real_features.get("Received Tnx", 0))
 

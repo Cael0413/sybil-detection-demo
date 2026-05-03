@@ -3,11 +3,9 @@ import json
 from datetime import datetime
 
 import joblib
-import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
-import xgboost as xgb
 
 
 # ==========================================
@@ -59,16 +57,12 @@ st.markdown(
 # ==========================================
 # 2. API 金鑰與鏈別設定
 # ==========================================
-def get_api_key() -> str | None:
-    """
-    優先讀取 Streamlit secrets，其次讀取環境變數。
-    """
+def get_api_key():
     try:
         if "ALCHEMY_API_KEY" in st.secrets:
             return st.secrets["ALCHEMY_API_KEY"]
     except Exception:
         pass
-
     return os.getenv("ALCHEMY_API_KEY")
 
 
@@ -85,39 +79,32 @@ if API_KEY:
         "BNB Chain (BSC)": f"https://bnb-mainnet.g.alchemy.com/v2/{API_KEY}",
     }
 
-# 7 天視窗的區塊估計值（以 Ethereum 為基準）
+# 7 天視窗估計區塊數
 BLOCK_WINDOW = 50400
 
 
 # ==========================================
 # 3. 小工具函式
 # ==========================================
-def safe_post(url: str, payload: dict) -> dict:
+def safe_post(url, payload):
     headers = {"accept": "application/json", "content-type": "application/json"}
     response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=30)
     response.raise_for_status()
     return response.json()
 
 
-def is_valid_evm_address(address: str) -> bool:
+def is_valid_evm_address(address):
     return address.startswith("0x") and len(address) == 42
 
 
-def build_column_lookup(model_columns: list[str]) -> dict[str, str]:
-    """
-    建立去除前後空白後的欄位對照表，避免舊版欄位命名中有空白。
-    """
+def build_column_lookup(model_columns):
     lookup = {}
     for col in model_columns:
         lookup[col.strip()] = col
     return lookup
 
 
-def align_features_to_model_columns(real_features: dict, model_columns: list[str]) -> pd.DataFrame:
-    """
-    將即時計算之特徵對齊到模型欄位。
-    支援欄位前後空白差異。
-    """
+def align_features_to_model_columns(real_features, model_columns):
     input_df = pd.DataFrame(columns=model_columns)
     input_df.loc[0] = 0
 
@@ -134,11 +121,7 @@ def align_features_to_model_columns(real_features: dict, model_columns: list[str
 # ==========================================
 # 4. 特徵擷取
 # ==========================================
-def get_real_features(address: str, alchemy_url: str):
-    """
-    以地址首次收到資金為起點，向後抓取 7 天視窗內可觀察行為，
-    建立與論文 T+7 主模型一致的早期特徵。
-    """
+def get_real_features(address, alchemy_url):
     features = {}
     all_timestamps = []
 
@@ -273,8 +256,8 @@ def get_real_features(address: str, alchemy_url: str):
 # ==========================================
 @st.cache_resource
 def load_assets():
-    model_path = "fraud_detection_model_final_t7.json"
-    columns_path = "model_columns_final_t7.joblib"
+    model_path = "fraud_detector_xgb_t7.joblib"
+    columns_path = "model_columns_v5.joblib"
 
     if not os.path.exists(model_path):
         return None, None, f"找不到模型檔：{model_path}"
@@ -282,15 +265,14 @@ def load_assets():
         return None, None, f"找不到欄位檔：{columns_path}"
 
     try:
-        model = xgb.Booster()
-        model.load_model(model_path)
+        model = joblib.load(model_path)
         model_columns = joblib.load(columns_path)
         return model, model_columns, None
     except Exception as e:
         return None, None, f"模型載入失敗：{e}"
 
 
-bst, model_columns, load_error = load_assets()
+model, model_columns, load_error = load_assets()
 
 
 # ==========================================
@@ -351,7 +333,6 @@ with st.sidebar:
     st.markdown("---")
     st.caption("© 2026 Blockchain Research Lab")
 
-
 st.markdown("### 🔍 地址首週行為分析")
 
 if not API_KEY:
@@ -381,7 +362,7 @@ analyze_btn = st.button("🚀 啟動偵測", type="primary", use_container_width
 if analyze_btn:
     if not API_KEY:
         st.error("請先設定 ALCHEMY_API_KEY。")
-    elif bst is None or model_columns is None:
+    elif model is None or model_columns is None:
         st.error("模型尚未成功載入，請確認模型檔與欄位檔是否正確。")
     elif not is_valid_evm_address(address_input):
         st.warning("地址格式錯誤，請輸入標準 EVM 地址（42 字元）。")
@@ -396,8 +377,7 @@ if analyze_btn:
         elif real_features:
             try:
                 input_df = align_features_to_model_columns(real_features, model_columns)
-                dtest = xgb.DMatrix(input_df)
-                prediction = float(bst.predict(dtest)[0])
+                prediction = float(model.predict_proba(input_df)[0][1])
 
                 # ==========================================
                 # 規則式安全防線
@@ -405,16 +385,12 @@ if analyze_btn:
                 is_extreme_anomaly = False
                 total_txns = int(real_features.get("Sent tnx", 0) + real_features.get("Received Tnx", 0))
 
-                # 規則示例：首週最大單筆接收超過 1000，且總交易數 > 50
                 if real_features.get("Max Val Received", 0) > 1000 and total_txns > 50:
                     is_extreme_anomaly = True
                     prediction = 0.9999
 
                 risk_score = prediction * 100
 
-                # ==========================================
-                # 結果展示
-                # ==========================================
                 st.markdown("---")
                 st.subheader("📊 偵測報告")
 

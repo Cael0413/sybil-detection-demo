@@ -90,6 +90,9 @@ if API_KEY:
         "BNB Chain (BSC)": f"https://bnb-mainnet.g.alchemy.com/v2/{API_KEY}",
     }
 
+# 7 天視窗估計區塊數
+BLOCK_WINDOW = 50400
+
 
 # ==========================================
 # 3. 小工具函式

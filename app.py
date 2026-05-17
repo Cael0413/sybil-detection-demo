@@ -7,7 +7,7 @@ import joblib
 import pandas as pd
 import requests
 import streamlit as st
-
+import plotly.express as px
 
 # ==========================================
 # 1. 基本設定
@@ -24,36 +24,46 @@ st.markdown(
     <style>
     .main-title {
         text-align: center;
-        font-size: 2.7rem;
-        font-weight: 700;
+        font-size: 2.6rem;
+        font-weight: 800;
         color: #FF4B4B;
         margin-bottom: 0px;
     }
     .sub-title {
         text-align: center;
-        font-size: 1.1rem;
-        color: #D9D9D9;
-        margin-bottom: 24px;
+        font-size: 1.05rem;
+        color: #C9D1D9;
+        margin-bottom: 18px;
+    }
+    .section-card {
+        background-color: #1f2937;
+        border: 1px solid #374151;
+        border-radius: 14px;
+        padding: 18px;
+        margin-bottom: 15px;
+    }
+    .small-note {
+        color: #9CA3AF;
+        font-size: 0.9rem;
     }
     div[data-testid="stMetric"] {
-        background-color: #262730;
-        border: 1px solid #464b5f;
-        padding: 15px;
-        border-radius: 10px;
-        box-shadow: 2px 2px 5px rgba(0,0,0,0.35);
+        background-color: #1f2937;
+        border: 1px solid #374151;
+        padding: 14px;
+        border-radius: 12px;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.25);
     }
     div[data-testid="stMetricValue"] {
         color: #FFFFFF !important;
         font-weight: bold;
     }
     div[data-testid="stMetricLabel"] {
-        color: #BBBBBB !important;
+        color: #D1D5DB !important;
     }
     </style>
     """,
     unsafe_allow_html=True,
 )
-
 
 # ==========================================
 # 2. API 金鑰與鏈別設定
@@ -89,7 +99,7 @@ BLOCK_WINDOW = 50400
 # ==========================================
 def safe_post(url, payload):
     headers = {"accept": "application/json", "content-type": "application/json"}
-    response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=30)
+    response = requests.post(headers=headers, url=url, data=json.dumps(payload), timeout=30)
 
     if response.status_code == 403:
         raise requests.exceptions.RequestException("目前 API key 無法存取該鏈資料，請確認 Alchemy 權限設定。")
@@ -111,8 +121,7 @@ def build_column_lookup(model_columns):
 
 def align_features_to_model_columns(real_features, model_columns):
     """
-    依模型內建欄位建立輸入表，統一用 float，避免 dtype 衝突。
-    僅將與模型欄位對應的特徵填入，展示用欄位不會進模型。
+    依模型內建欄位建立輸入表，統一 float，展示用欄位不送進模型。
     """
     input_df = pd.DataFrame([[0.0] * len(model_columns)], columns=model_columns).astype(float)
     column_lookup = build_column_lookup(model_columns)
@@ -128,13 +137,61 @@ def align_features_to_model_columns(real_features, model_columns):
     return input_df
 
 
+def prepare_token_pie_data(token_stats, top_n=10):
+    """
+    token 次數 dict -> pie chart DataFrame
+    只留前 top_n，其餘合併為「其他」
+    """
+    if not token_stats or not isinstance(token_stats, dict):
+        return pd.DataFrame(columns=["Token", "Count"])
+
+    df = pd.DataFrame(list(token_stats.items()), columns=["Token", "Count"])
+    df = df.sort_values("Count", ascending=False)
+
+    if len(df) > top_n:
+        top_df = df.iloc[:top_n].copy()
+        other_count = df.iloc[top_n:]["Count"].sum()
+        if other_count > 0:
+            other_row = pd.DataFrame([{"Token": "其他", "Count": other_count}])
+            df = pd.concat([top_df, other_row], ignore_index=True)
+        else:
+            df = top_df
+
+    return df
+
+
+def prepare_token_table(received_stats, sent_stats):
+    """
+    收到 / 發送 token stats 合成表格
+    """
+    all_tokens = sorted(set(received_stats.keys()) | set(sent_stats.keys()))
+    rows = []
+    for token in all_tokens:
+        r = int(received_stats.get(token, 0))
+        s = int(sent_stats.get(token, 0))
+        rows.append(
+            {
+                "Token": token,
+                "Received Count": r,
+                "Sent Count": s,
+                "Total Interactions": r + s,
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(columns=["Token", "Received Count", "Sent Count", "Total Interactions"])
+
+    df = pd.DataFrame(rows).sort_values("Total Interactions", ascending=False).reset_index(drop=True)
+    return df
+
+
 # ==========================================
 # 4. 特徵擷取
 # ==========================================
 def get_real_features(address, alchemy_url):
     """
     以地址首次收到資金為起點，向後抓取 7 天視窗內可觀察行為。
-    並額外統計 ERC20 幣種資訊（僅展示，不作為模型輸入）。
+    幣種資訊只做展示用途，不送進模型。
     """
     features = {}
     all_timestamps = []
@@ -185,7 +242,7 @@ def get_real_features(address, alchemy_url):
         features["Received Tnx"] = len(txs_in)
         vals_in = [float(tx.get("value") or 0) for tx in txs_in]
         features["total ether received"] = sum(vals_in)
-        features["Max Val Received"] = max(vals_in) if vals_in else 0
+        features["Max Val Received"] = max(vals_in) if vals_in else 0.0
 
         for tx in txs_in:
             if "metadata" in tx and "blockTimestamp" in tx["metadata"]:
@@ -203,7 +260,7 @@ def get_real_features(address, alchemy_url):
         features["Sent tnx"] = len(txs_out)
         vals_out = [float(tx.get("value") or 0) for tx in txs_out]
         features["total Ether sent"] = sum(vals_out)
-        features["Max Val Sent"] = max(vals_out) if vals_out else 0
+        features["Max Val Sent"] = max(vals_out) if vals_out else 0.0
 
         for tx in txs_out:
             if "metadata" in tx and "blockTimestamp" in tx["metadata"]:
@@ -234,9 +291,7 @@ def get_real_features(address, alchemy_url):
             len(set(tx.get("to") for tx in txs_out_20 if tx.get("to")))
         )
 
-        # ==============================
-        # ERC20 幣種資訊統計（僅展示，不作為模型輸入）
-        # ==============================
+        # 4. ERC20 幣種資訊統計（只展示）
         received_token_list = [tx.get("asset") for tx in txs_in_20 if tx.get("asset")]
         sent_token_list = [tx.get("asset") for tx in txs_out_20 if tx.get("asset")]
 
@@ -260,7 +315,7 @@ def get_real_features(address, alchemy_url):
         features["ERC20 sent token stats"] = dict(sent_token_counter)
         features["ERC20 all token stats"] = dict(all_token_counter)
 
-        # 4. 零值交易
+        # 5. 零值交易
         zero_count = 0
         for tx in txs_out + txs_out_20:
             tx_val = tx.get("value")
@@ -268,12 +323,12 @@ def get_real_features(address, alchemy_url):
                 zero_count += 1
         features["Zero Value Tx Count"] = zero_count
 
-        # 5. 收送比例
+        # 6. 收送比例
         total_received = features["Received Tnx"] + len(txs_in_20)
         total_sent = features["Sent tnx"] + len(txs_out_20)
-        features["Sent/Received Ratio"] = (total_sent / total_received) if total_received > 0 else 0
+        features["Sent/Received Ratio"] = (total_sent / total_received) if total_received > 0 else 0.0
 
-        # 6. 時間特徵
+        # 7. 時間特徵
         if all_timestamps:
             ts_list = [datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp() for t in all_timestamps]
             ts_list.sort()
@@ -282,10 +337,10 @@ def get_real_features(address, alchemy_url):
             if len(ts_list) > 1:
                 features["Avg min between sent tnx"] = ((ts_list[-1] - ts_list[0]) / (len(ts_list) - 1)) / 60
             else:
-                features["Avg min between sent tnx"] = 0
+                features["Avg min between sent tnx"] = 0.0
         else:
-            features["Time Diff between first and last (Mins)"] = 0
-            features["Avg min between sent tnx"] = 0
+            features["Time Diff between first and last (Mins)"] = 0.0
+            features["Avg min between sent tnx"] = 0.0
 
         return features, None
 
@@ -296,7 +351,7 @@ def get_real_features(address, alchemy_url):
 
 
 # ==========================================
-# 5. 載入模型（直接使用模型內建欄位）
+# 5. 載入模型
 # ==========================================
 @st.cache_resource
 def load_assets():
@@ -322,35 +377,8 @@ model, model_columns, load_error = load_assets()
 
 
 # ==========================================
-# 6. 前端介面
+# 6. 側邊欄
 # ==========================================
-st.markdown('<div class="main-title">🛡️ 區塊鏈詐騙錢包偵測系統</div>', unsafe_allow_html=True)
-st.markdown(
-    '<div class="sub-title">XGBoost + Dynamic Time-Window Features + Rule-based Safety Layer</div>',
-    unsafe_allow_html=True,
-)
-
-with st.expander("ℹ️ 關於本系統"):
-    st.markdown(
-        """
-        **本系統為研究展示與概念驗證原型。**
-
-        主要設計理念如下：
-
-        1. **動態時間窗特徵工程（Dynamic Time-Window）**  
-           以地址首次收到資金作為共同起點，擷取其後固定視窗內之可觀察鏈上行為。
-
-        2. **XGBoost 主模型**  
-           作為主要風險分類引擎，用於辨識可疑詐騙錢包地址。
-
-        3. **規則式安全防線（Rule-based Safety Layer）**  
-           針對極端異常之大額高頻行為，提供額外風險覆蓋機制。
-
-        4. **多鏈雷達展示（Multi-chain Radar）**  
-           支援多個 EVM 相容網路的地址掃描與早期風險檢測展示。
-        """
-    )
-
 with st.sidebar:
     st.title("模型資訊")
 
@@ -379,6 +407,37 @@ with st.sidebar:
     st.markdown("---")
     st.caption("© 2026 Blockchain Research Lab")
 
+
+# ==========================================
+# 7. 主畫面
+# ==========================================
+st.markdown('<div class="main-title">🛡️ 區塊鏈詐騙錢包偵測系統</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="sub-title">XGBoost + Dynamic Time-Window Features + Rule-based Safety Layer</div>',
+    unsafe_allow_html=True,
+)
+
+with st.expander("ℹ️ 關於本系統"):
+    st.markdown(
+        """
+        **本系統為研究展示與概念驗證原型。**
+
+        核心設計包含：
+
+        1. **動態時間窗特徵工程（Dynamic Time-Window）**  
+           以地址首次收到資金作為共同起點，擷取其後固定視窗內之可觀察鏈上行為。
+
+        2. **XGBoost 主模型**  
+           作為主要風險分類引擎，用於辨識可疑詐騙錢包地址。
+
+        3. **規則式安全防線（Rule-based Safety Layer）**  
+           針對極端異常之大額高頻行為，提供額外風險覆蓋機制。
+
+        4. **多鏈雷達展示（Multi-chain Radar）**  
+           支援多個 EVM 相容網路的地址掃描與早期風險檢測展示。
+        """
+    )
+
 st.markdown("### 🔍 地址首週行為分析")
 
 if not API_KEY:
@@ -405,6 +464,10 @@ with col_addr:
 
 analyze_btn = st.button("🚀 啟動偵測", type="primary", use_container_width=True)
 
+
+# ==========================================
+# 8. 執行分析
+# ==========================================
 if analyze_btn:
     if not API_KEY:
         st.error("請先設定 ALCHEMY_API_KEY。")
@@ -420,6 +483,7 @@ if analyze_btn:
 
         if error_msg:
             st.warning(error_msg)
+
         elif real_features:
             try:
                 input_df = align_features_to_model_columns(real_features, model_columns)
@@ -440,10 +504,13 @@ if analyze_btn:
                 st.markdown("---")
                 st.subheader("📊 偵測報告")
 
-                res_col1, res_col2 = st.columns([1.5, 2])
+                # ==========================
+                # 第一區：風險結果 + 關鍵摘要
+                # ==========================
+                top_col1, top_col2 = st.columns([1.2, 1.4])
 
-                with res_col1:
-                    st.markdown("**系統判讀結果**")
+                with top_col1:
+                    st.markdown("#### 系統判讀結果")
                     st.metric("風險分數（Risk Score）", f"{risk_score:.2f}%")
 
                     if is_extreme_anomaly:
@@ -456,46 +523,155 @@ if analyze_btn:
                     else:
                         st.success("✅ **低風險（Normal）**\n\n模型判定該地址首週行為模式相對正常。")
 
-                with res_col2:
-                    st.markdown("**首週關鍵行為摘要**")
-                    st.write(f"⏱️ 平均交易間隔：`{real_features.get('Avg min between sent tnx', 0):.2f} 分`")
-                    st.write(f"💸 發送 / 接收比率：`{real_features.get('Sent/Received Ratio', 0):.2f}`")
-                    st.write(f"🔄 首週交易總數：`{total_txns} 次`")
-                    st.write(f"💰 最大單筆接收：`{real_features.get('Max Val Received', 0):.4f}`")
+                with top_col2:
+                    st.markdown("#### 首週關鍵行為摘要")
 
-                    st.markdown("**ERC20 幣種資訊**")
-                    st.write(f"🪙 互動幣種總數：`{real_features.get('ERC20 token count', 0)}`")
-                    st.write(f"📥 收到幣種：`{real_features.get('ERC20 received token list', '無')}`")
-                    st.write(f"📤 發送幣種：`{real_features.get('ERC20 sent token list', '無')}`")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.metric("平均交易間隔（分）", f"{real_features.get('Avg min between sent tnx', 0):.2f}")
+                        st.metric("首週交易總數", f"{total_txns}")
+                    with c2:
+                        st.metric("發送 / 接收比率", f"{real_features.get('Sent/Received Ratio', 0):.2f}")
+                        st.metric("最大單筆接收", f"{real_features.get('Max Val Received', 0):.4f}")
 
+                    st.caption("以上摘要基於地址首次收到資金後之首週行為統計。")
+
+                # ==========================
+                # 第二區：行為概覽圖
+                # ==========================
                 st.markdown("#### 📈 行為概覽圖")
+
                 viz_df = pd.DataFrame(
                     {
-                        "特徵": ["Sent Tnx", "Avg Time Diff (Min)", "Zero Value Tx Count"],
-                        "數值": [
-                            real_features.get("Sent tnx", 0),
-                            real_features.get("Avg min between sent tnx", 0),
-                            real_features.get("Zero Value Tx Count", 0),
+                        "Feature": ["Sent Tnx", "Avg Time Diff (Min)", "Zero Value Tx Count"],
+                        "Value": [
+                            float(real_features.get("Sent tnx", 0)),
+                            float(real_features.get("Avg min between sent tnx", 0)),
+                            float(real_features.get("Zero Value Tx Count", 0)),
                         ],
                     }
                 )
-                st.bar_chart(viz_df.set_index("特徵"))
+
+                fig_bar = px.bar(
+                    viz_df,
+                    x="Feature",
+                    y="Value",
+                    title="首週行為重點指標",
+                    text="Value",
+                    color="Feature",
+                    color_discrete_sequence=px.colors.qualitative.Set2,
+                )
+                fig_bar.update_layout(
+                    template="plotly_dark",
+                    showlegend=False,
+                    height=420,
+                    xaxis_title="特徵",
+                    yaxis_title="數值",
+                )
+                st.plotly_chart(fig_bar, use_container_width=True)
+
+                # ==========================
+                # 第三區：ERC20 幣種圖表
+                # ==========================
+                st.markdown("#### 🪙 ERC20 幣種資訊")
+
+                received_stats = real_features.get("ERC20 received token stats", {})
+                sent_stats = real_features.get("ERC20 sent token stats", {})
+                all_stats = real_features.get("ERC20 all token stats", {})
+
+                st.metric("互動幣種總數", f"{real_features.get('ERC20 token count', 0)}")
+
+                pie_col1, pie_col2 = st.columns(2)
+
+                with pie_col1:
+                    st.markdown("##### 📥 收到幣種分布")
+                    received_df = prepare_token_pie_data(received_stats, top_n=10)
+
+                    if not received_df.empty:
+                        fig_received = px.pie(
+                            received_df,
+                            names="Token",
+                            values="Count",
+                            hole=0.45,
+                            title="收到幣種 Top 10 分布"
+                        )
+                        fig_received.update_traces(textinfo="percent+label")
+                        fig_received.update_layout(
+                            template="plotly_dark",
+                            legend_title="Token",
+                            height=450
+                        )
+                        st.plotly_chart(fig_received, use_container_width=True)
+                    else:
+                        st.info("此地址在首週內沒有收到 ERC20 幣種資料。")
+
+                with pie_col2:
+                    st.markdown("##### 📤 發送幣種分布")
+                    sent_df = prepare_token_pie_data(sent_stats, top_n=10)
+
+                    if not sent_df.empty:
+                        fig_sent = px.pie(
+                            sent_df,
+                            names="Token",
+                            values="Count",
+                            hole=0.45,
+                            title="發送幣種 Top 10 分布"
+                        )
+                        fig_sent.update_traces(textinfo="percent+label")
+                        fig_sent.update_layout(
+                            template="plotly_dark",
+                            legend_title="Token",
+                            height=450
+                        )
+                        st.plotly_chart(fig_sent, use_container_width=True)
+                    else:
+                        st.info("此地址在首週內沒有發送 ERC20 幣種資料。")
+
+                st.markdown("##### 🪙 全部互動幣種分布")
+                all_df = prepare_token_pie_data(all_stats, top_n=12)
+
+                if not all_df.empty:
+                    fig_all = px.pie(
+                        all_df,
+                        names="Token",
+                        values="Count",
+                        hole=0.50,
+                        title="全部互動幣種 Top 12 分布"
+                    )
+                    fig_all.update_traces(textinfo="percent+label")
+                    fig_all.update_layout(
+                        template="plotly_dark",
+                        legend_title="Token",
+                        height=500
+                    )
+                    st.plotly_chart(fig_all, use_container_width=True)
+                else:
+                    st.info("此地址在首週內沒有 ERC20 互動資料。")
+
+                # ==========================
+                # 第四區：ERC20 統計表
+                # ==========================
+                st.markdown("#### 📋 ERC20 幣種統計表")
+                token_table_df = prepare_token_table(received_stats, sent_stats)
+
+                if not token_table_df.empty:
+                    st.dataframe(token_table_df, use_container_width=True)
+                else:
+                    st.info("目前沒有可顯示的 ERC20 幣種統計表。")
+
+                # ==========================
+                # 第五區：展開細節
+                # ==========================
+                with st.expander("🔍 查看 ERC20 幣種文字清單"):
+                    st.write(f"📥 收到幣種： {real_features.get('ERC20 received token list', '無')}")
+                    st.write(f"📤 發送幣種： {real_features.get('ERC20 sent token list', '無')}")
+                    st.write(f"🪙 全部互動幣種： {real_features.get('ERC20 all token list', '無')}")
 
                 with st.expander("🔍 查看詳細萃取特徵"):
                     st.json(real_features)
 
-                with st.expander("🪙 查看 ERC20 幣種次數統計"):
-                    st.markdown("**全部互動幣種次數**")
-                    st.json(real_features.get("ERC20 all token stats", {}))
-
-                    st.markdown("**收到幣種次數**")
-                    st.json(real_features.get("ERC20 received token stats", {}))
-
-                    st.markdown("**發送幣種次數**")
-                    st.json(real_features.get("ERC20 sent token stats", {}))
-
                 with st.expander("🧾 模型輸入欄位預覽"):
-                    st.dataframe(input_df.T.rename(columns={0: "value"}))
+                    st.dataframe(input_df.T.rename(columns={0: "value"}), use_container_width=True)
 
                 with st.expander("🧠 模型欄位列表"):
                     st.write(model_columns)

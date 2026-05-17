@@ -1,6 +1,7 @@
 import os
 import json
 from datetime import datetime
+from collections import Counter
 
 import joblib
 import pandas as pd
@@ -89,12 +90,16 @@ BLOCK_WINDOW = 50400
 def safe_post(url, payload):
     headers = {"accept": "application/json", "content-type": "application/json"}
     response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=30)
+
+    if response.status_code == 403:
+        raise requests.exceptions.RequestException("目前 API key 無法存取該鏈資料，請確認 Alchemy 權限設定。")
+
     response.raise_for_status()
     return response.json()
 
 
 def is_valid_evm_address(address):
-    return address.startswith("0x") and len(address) == 42
+    return isinstance(address, str) and address.startswith("0x") and len(address) == 42
 
 
 def build_column_lookup(model_columns):
@@ -106,7 +111,8 @@ def build_column_lookup(model_columns):
 
 def align_features_to_model_columns(real_features, model_columns):
     """
-    依模型內建欄位建立輸入表，統一用 float，避免 int64 / float 衝突。
+    依模型內建欄位建立輸入表，統一用 float，避免 dtype 衝突。
+    僅將與模型欄位對應的特徵填入，展示用欄位不會進模型。
     """
     input_df = pd.DataFrame([[0.0] * len(model_columns)], columns=model_columns).astype(float)
     column_lookup = build_column_lookup(model_columns)
@@ -128,6 +134,7 @@ def align_features_to_model_columns(real_features, model_columns):
 def get_real_features(address, alchemy_url):
     """
     以地址首次收到資金為起點，向後抓取 7 天視窗內可觀察行為。
+    並額外統計 ERC20 幣種資訊（僅展示，不作為模型輸入）。
     """
     features = {}
     all_timestamps = []
@@ -227,6 +234,32 @@ def get_real_features(address, alchemy_url):
             len(set(tx.get("to") for tx in txs_out_20 if tx.get("to")))
         )
 
+        # ==============================
+        # ERC20 幣種資訊統計（僅展示，不作為模型輸入）
+        # ==============================
+        received_token_list = [tx.get("asset") for tx in txs_in_20 if tx.get("asset")]
+        sent_token_list = [tx.get("asset") for tx in txs_out_20 if tx.get("asset")]
+
+        received_token_counter = Counter(received_token_list)
+        sent_token_counter = Counter(sent_token_list)
+        all_token_counter = Counter(received_token_list + sent_token_list)
+
+        received_tokens = sorted(received_token_counter.keys())
+        sent_tokens = sorted(sent_token_counter.keys())
+        all_tokens = sorted(all_token_counter.keys())
+
+        features["ERC20 received token list"] = ", ".join(received_tokens) if received_tokens else "無"
+        features["ERC20 sent token list"] = ", ".join(sent_tokens) if sent_tokens else "無"
+        features["ERC20 all token list"] = ", ".join(all_tokens) if all_tokens else "無"
+
+        features["ERC20 received token count"] = len(received_tokens)
+        features["ERC20 sent token count"] = len(sent_tokens)
+        features["ERC20 token count"] = len(all_tokens)
+
+        features["ERC20 received token stats"] = dict(received_token_counter)
+        features["ERC20 sent token stats"] = dict(sent_token_counter)
+        features["ERC20 all token stats"] = dict(all_token_counter)
+
         # 4. 零值交易
         zero_count = 0
         for tx in txs_out + txs_out_20:
@@ -240,7 +273,7 @@ def get_real_features(address, alchemy_url):
         total_sent = features["Sent tnx"] + len(txs_out_20)
         features["Sent/Received Ratio"] = (total_sent / total_received) if total_received > 0 else 0
 
-        # 6. 時間特徵（僅在模型需要時才填）
+        # 6. 時間特徵
         if all_timestamps:
             ts_list = [datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp() for t in all_timestamps]
             ts_list.sort()
@@ -430,6 +463,11 @@ if analyze_btn:
                     st.write(f"🔄 首週交易總數：`{total_txns} 次`")
                     st.write(f"💰 最大單筆接收：`{real_features.get('Max Val Received', 0):.4f}`")
 
+                    st.markdown("**ERC20 幣種資訊**")
+                    st.write(f"🪙 互動幣種總數：`{real_features.get('ERC20 token count', 0)}`")
+                    st.write(f"📥 收到幣種：`{real_features.get('ERC20 received token list', '無')}`")
+                    st.write(f"📤 發送幣種：`{real_features.get('ERC20 sent token list', '無')}`")
+
                 st.markdown("#### 📈 行為概覽圖")
                 viz_df = pd.DataFrame(
                     {
@@ -445,6 +483,16 @@ if analyze_btn:
 
                 with st.expander("🔍 查看詳細萃取特徵"):
                     st.json(real_features)
+
+                with st.expander("🪙 查看 ERC20 幣種次數統計"):
+                    st.markdown("**全部互動幣種次數**")
+                    st.json(real_features.get("ERC20 all token stats", {}))
+
+                    st.markdown("**收到幣種次數**")
+                    st.json(real_features.get("ERC20 received token stats", {}))
+
+                    st.markdown("**發送幣種次數**")
+                    st.json(real_features.get("ERC20 sent token stats", {}))
 
                 with st.expander("🧾 模型輸入欄位預覽"):
                     st.dataframe(input_df.T.rename(columns={0: "value"}))

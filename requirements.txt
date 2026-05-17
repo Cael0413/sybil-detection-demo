@@ -2,5 +2,6 @@ streamlit
 pandas
 joblib
 requests
+plotly
 xgboost
 scikit-learn
